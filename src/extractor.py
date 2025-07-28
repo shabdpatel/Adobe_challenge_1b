@@ -40,32 +40,37 @@ class ContentExtractor:
 
     @staticmethod
     def extract_meaningful_headings(outline, pdf_path):
-        """Filter out non-descriptive headings and add title"""
         headings = []
         total_pages = ContentExtractor.get_total_pages(pdf_path)
-        
+
         # Add title as special section
         headings.append({
             "text": outline.get("title", "Untitled"),
             "level": "H0",
             "page": 1
         })
-        
-        # Filter headings
+
+        # Less aggressive filtering
         for item in outline.get("outline", []):
-            text = item.get("text", "")
-            if (len(text) >= Config.MIN_HEADING_LENGTH and
-                not re.match(r'^\d+\.?$', text) and
-                not text.startswith(('•', '-', '*')) and
-                not text.endswith(('.', ',', ';')) and
-                any(c.isupper() for c in text)):
-                headings.append(item)
-        
+            text = item.get("text", "").strip()
+            if len(text) < Config.MIN_HEADING_LENGTH:
+                continue
+
+            # Keep headings that start with bullet points (common in outlines)
+            if text.startswith(('•', '-', '*')):
+                text = text[1:].strip()  # Remove bullet but keep text
+
+            headings.append({
+                "text": text,
+                "level": item.get("level", "H1"),
+                "page": item.get("page", 1)
+            })
+
         # Add end pages for section content extraction
         for i in range(len(headings)):
             if i < len(headings) - 1:
                 headings[i]["end_page"] = headings[i+1]["page"] - 1
             else:
                 headings[i]["end_page"] = total_pages
-        
-        return headings
+
+        return headings  # REMOVED THE EXTRA DOT HERE

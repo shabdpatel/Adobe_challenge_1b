@@ -1,28 +1,38 @@
+# /Users/shabdpatel/Documents/adobe/Challenge_1b/src/ranker.py
 import logging
 import re
 import numpy as np
+from extractor import ContentExtractor
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from config import Config
+import sys
 
 logger = logging.getLogger(__name__)
 
 class SemanticRanker:
     def __init__(self):
-        logger.info(f"Loading model from: {Config.EMBEDDING_MODEL}")
+        self.model = self.load_model_with_fallback()
+        
+    def load_model_with_fallback(self):
+        """Load model with multiple fallback strategies"""
         try:
-            self.model = SentenceTransformer(Config.EMBEDDING_MODEL)
-            logger.info(f"Model loaded: {self.model.get_sentence_embedding_dimension()} dimensions")
+            logger.info(f"Loading model from: {Config.EMBEDDING_MODEL}")
+            return SentenceTransformer(Config.EMBEDDING_MODEL)
         except Exception as e:
-            logger.error(f"Failed to load model: {str(e)}")
-            raise
+            logger.error(f"Custom model loading failed: {str(e)}")
+            try:
+                logger.info("Loading fallback model: all-MiniLM-L6-v2")
+                return SentenceTransformer('all-MiniLM-L6-v2')
+            except Exception as fallback_error:
+                logger.critical(f"Fallback model failed: {str(fallback_error)}")
+                sys.exit(1)
 
     def create_context_embedding(self, persona, job):
         context = f"As a {persona}, {job}"
         return self.model.encode([context])
     
     def rank_items(self, query_embed, items, text_fn):
-        """Generic ranking function for sections/subsections"""
         if not items:
             return []
             
@@ -39,63 +49,64 @@ class SectionProcessor:
         self.ranker = ranker
         
     def process_document(self, doc_path, outline, persona, job):
-        """Process a single document's outline"""
         headings = ContentExtractor.extract_meaningful_headings(outline, doc_path)
         if not headings:
-            logger.warning(f"No meaningful headings found in {doc_path}")
             return []
         
         context_embed = self.ranker.create_context_embedding(persona, job)
         
         try:
-            # Rank headings with their content
+            # Use heading text + first 50 chars of content
             ranked_headings = self.ranker.rank_items(
                 context_embed, 
                 headings,
-                lambda h: f"{h['text']}: {ContentExtractor.extract_section_content(doc_path, h['page'], h.get('end_page'))[:300]}"
+                lambda h: f"{h['text']} {ContentExtractor.extract_section_content(doc_path, h['page'], h['page'])[:50]}"
             )
             return ranked_headings
         except Exception as e:
             logger.error(f"Error processing document {doc_path}: {str(e)}")
             return []
-    
+        
     def extract_subsections(self, section, content, persona, job):
-        """Extract relevant subsections from section content"""
         if not content:
             return []
             
-        # Split content into meaningful chunks
-        chunks = []
-        current_chunk = ""
+        # Improved paragraph splitting
+        paragraphs = []
+        current_para = ""
         
         for line in content.split('\n'):
-            line = line.strip()
-            if not line:
-                if current_chunk:
-                    chunks.append(current_chunk)
-                    current_chunk = ""
+            stripped = line.strip()
+            if not stripped:
+                if current_para:
+                    paragraphs.append(current_para)
+                    current_para = ""
                 continue
                 
-            # Start new chunk for bullet points or numbered lists
-            if re.match(r'^(\d+\.\s|\•\s|\*\s|-)', line):
-                if current_chunk:
-                    chunks.append(current_chunk)
-                current_chunk = line
-            # Start new chunk for headings (all caps or title case)
-            elif line.isupper() or line.istitle():
-                if current_chunk:
-                    chunks.append(current_chunk)
-                current_chunk = line
+            # Start new paragraph for:
+            # - Bullet points
+            # - Numbered lists
+            # - All-caps lines (potential headings)
+            if (re.match(r'^(\d+\.\s|\•\s|\*\s|-)', stripped) 
+                or stripped.isupper() 
+                or (current_para and len(current_para) > 200)):
+                if current_para:
+                    paragraphs.append(current_para)
+                current_para = stripped
             else:
-                current_chunk += " " + line if current_chunk else line
+                current_para += " " + stripped if current_para else stripped
         
-        if current_chunk:
-            chunks.append(current_chunk)
+        if current_para:
+            paragraphs.append(current_para)
         
-        # Filter out short chunks
-        chunks = [chunk for chunk in chunks if len(chunk) > 30 and len(chunk) < Config.MAX_SUBSECTION_LENGTH]
+        # Filter paragraphs
+        valid_paras = [
+            p for p in paragraphs 
+            if 50 < len(p) < Config.MAX_SUBSECTION_LENGTH
+            and not any(term in p.lower() for term in ['copyright', 'page', 'confidential'])
+        ]
         
-        if not chunks:
+        if not valid_paras:
             return []
         
         context_embed = self.ranker.create_context_embedding(persona, job)
@@ -103,7 +114,7 @@ class SectionProcessor:
         try:
             ranked_chunks = self.ranker.rank_items(
                 context_embed,
-                chunks,
+                valid_paras,
                 lambda c: c
             )
             return ranked_chunks
